@@ -38,8 +38,10 @@
 // the use of this software, even if advised of the possibility of such damage.
 //
 //M*/
+
 #include "precomp.hpp"
-#include "opencl_kernels.hpp"
+#include "opencl_kernels_imgproc.hpp"
+#include "opencv2/core/hal/intrin.hpp"
 
 namespace cv
 {
@@ -95,8 +97,8 @@ static Moments contourMoments( const Mat& contour )
     Moments m;
     int lpt = contour.checkVector(2);
     int is_float = contour.depth() == CV_32F;
-    const Point* ptsi = (const Point*)contour.data;
-    const Point2f* ptsf = (const Point2f*)contour.data;
+    const Point* ptsi = contour.ptr<Point>();
+    const Point2f* ptsf = contour.ptr<Point2f>();
 
     CV_Assert( contour.depth() == CV_32S || contour.depth() == CV_32F );
 
@@ -203,6 +205,108 @@ static Moments contourMoments( const Mat& contour )
 \****************************************************************************************/
 
 template<typename T, typename WT, typename MT>
+struct MomentsInTile_SIMD
+{
+    int operator() (const T *, int, WT &, WT &, WT &, MT &)
+    {
+        return 0;
+    }
+};
+
+#if CV_SIMD128
+
+template <>
+struct MomentsInTile_SIMD<uchar, int, int>
+{
+    MomentsInTile_SIMD()
+    {
+        // nothing
+    }
+
+    int operator() (const uchar * ptr, int len, int & x0, int & x1, int & x2, int & x3)
+    {
+        int x = 0;
+
+        {
+            v_int16x8 dx = v_setall_s16(8), qx = v_int16x8(0, 1, 2, 3, 4, 5, 6, 7);
+            v_uint32x4 z = v_setzero_u32(), qx0 = z, qx1 = z, qx2 = z, qx3 = z;
+
+            for( ; x <= len - 8; x += 8 )
+            {
+                v_int16x8 p = v_reinterpret_as_s16(v_load_expand(ptr + x));
+                v_int16x8 sx = v_mul_wrap(qx, qx);
+
+                qx0 += v_reinterpret_as_u32(p);
+                qx1 = v_reinterpret_as_u32(v_dotprod(p, qx, v_reinterpret_as_s32(qx1)));
+                qx2 = v_reinterpret_as_u32(v_dotprod(p, sx, v_reinterpret_as_s32(qx2)));
+                qx3 = v_reinterpret_as_u32(v_dotprod(v_mul_wrap(p, qx), sx, v_reinterpret_as_s32(qx3)));
+
+                qx += dx;
+            }
+
+            x0 = v_reduce_sum(qx0);
+            x0 = (x0 & 0xffff) + (x0 >> 16);
+            x1 = v_reduce_sum(qx1);
+            x2 = v_reduce_sum(qx2);
+            x3 = v_reduce_sum(qx3);
+        }
+
+        return x;
+    }
+};
+
+template <>
+struct MomentsInTile_SIMD<ushort, int, int64>
+{
+    MomentsInTile_SIMD()
+    {
+        // nothing
+    }
+
+    int operator() (const ushort * ptr, int len, int & x0, int & x1, int & x2, int64 & x3)
+    {
+        int x = 0;
+
+        {
+            v_int32x4 v_delta = v_setall_s32(4), v_ix0 = v_int32x4(0, 1, 2, 3);
+            v_uint32x4 z = v_setzero_u32(), v_x0 = z, v_x1 = z, v_x2 = z;
+            v_uint64x2 v_x3 = v_reinterpret_as_u64(z);
+
+            for( ; x <= len - 4; x += 4 )
+            {
+                v_int32x4 v_src = v_reinterpret_as_s32(v_load_expand(ptr + x));
+
+                v_x0 += v_reinterpret_as_u32(v_src);
+                v_x1 += v_reinterpret_as_u32(v_src * v_ix0);
+
+                v_int32x4 v_ix1 = v_ix0 * v_ix0;
+                v_x2 += v_reinterpret_as_u32(v_src * v_ix1);
+
+                v_ix1 = v_ix0 * v_ix1;
+                v_src = v_src * v_ix1;
+                v_uint64x2 v_lo, v_hi;
+                v_expand(v_reinterpret_as_u32(v_src), v_lo, v_hi);
+                v_x3 += v_lo + v_hi;
+
+                v_ix0 += v_delta;
+            }
+
+            x0 = v_reduce_sum(v_x0);
+            x1 = v_reduce_sum(v_x1);
+            x2 = v_reduce_sum(v_x2);
+            v_store_aligned(buf64, v_reinterpret_as_s64(v_x3));
+            x3 = buf64[0] + buf64[1];
+        }
+
+        return x;
+    }
+
+    int64 CV_DECL_ALIGNED(16) buf64[2];
+};
+
+#endif
+
+template<typename T, typename WT, typename MT>
 #if defined __GNUC__ && __GNUC__ == 4 && __GNUC_MINOR__ >= 5 && __GNUC_MINOR__ < 9
 // Workaround for http://gcc.gnu.org/bugzilla/show_bug.cgi?id=60196
 __attribute__((optimize("no-tree-vectorize")))
@@ -212,14 +316,16 @@ static void momentsInTile( const Mat& img, double* moments )
     Size size = img.size();
     int x, y;
     MT mom[10] = {0,0,0,0,0,0,0,0,0,0};
+    MomentsInTile_SIMD<T, WT, MT> vop;
 
     for( y = 0; y < size.height; y++ )
     {
-        const T* ptr = (const T*)(img.data + y*img.step);
+        const T* ptr = img.ptr<T>(y);
         WT x0 = 0, x1 = 0, x2 = 0;
         MT x3 = 0;
+        x = vop(ptr, size.width, x0, x1, x2, x3);
 
-        for( x = 0; x < size.width; x++ )
+        for( ; x < size.width; x++ )
         {
             WT p = ptr[x];
             WT xp = x * p, xxp;
@@ -248,85 +354,6 @@ static void momentsInTile( const Mat& img, double* moments )
     for( x = 0; x < 10; x++ )
         moments[x] = (double)mom[x];
 }
-
-
-#if CV_SSE2
-
-template<> void momentsInTile<uchar, int, int>( const cv::Mat& img, double* moments )
-{
-    typedef uchar T;
-    typedef int WT;
-    typedef int MT;
-    Size size = img.size();
-    int y;
-    MT mom[10] = {0,0,0,0,0,0,0,0,0,0};
-    bool useSIMD = checkHardwareSupport(CV_CPU_SSE2);
-
-    for( y = 0; y < size.height; y++ )
-    {
-        const T* ptr = img.ptr<T>(y);
-        int x0 = 0, x1 = 0, x2 = 0, x3 = 0, x = 0;
-
-        if( useSIMD )
-        {
-            __m128i qx_init = _mm_setr_epi16(0, 1, 2, 3, 4, 5, 6, 7);
-            __m128i dx = _mm_set1_epi16(8);
-            __m128i z = _mm_setzero_si128(), qx0 = z, qx1 = z, qx2 = z, qx3 = z, qx = qx_init;
-
-            for( ; x <= size.width - 8; x += 8 )
-            {
-                __m128i p = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)(ptr + x)), z);
-                qx0 = _mm_add_epi32(qx0, _mm_sad_epu8(p, z));
-                __m128i px = _mm_mullo_epi16(p, qx);
-                __m128i sx = _mm_mullo_epi16(qx, qx);
-                qx1 = _mm_add_epi32(qx1, _mm_madd_epi16(p, qx));
-                qx2 = _mm_add_epi32(qx2, _mm_madd_epi16(p, sx));
-                qx3 = _mm_add_epi32(qx3, _mm_madd_epi16(px, sx));
-
-                qx = _mm_add_epi16(qx, dx);
-            }
-            int CV_DECL_ALIGNED(16) buf[4];
-            _mm_store_si128((__m128i*)buf, qx0);
-            x0 = buf[0] + buf[1] + buf[2] + buf[3];
-            _mm_store_si128((__m128i*)buf, qx1);
-            x1 = buf[0] + buf[1] + buf[2] + buf[3];
-            _mm_store_si128((__m128i*)buf, qx2);
-            x2 = buf[0] + buf[1] + buf[2] + buf[3];
-            _mm_store_si128((__m128i*)buf, qx3);
-            x3 = buf[0] + buf[1] + buf[2] + buf[3];
-        }
-
-        for( ; x < size.width; x++ )
-        {
-            WT p = ptr[x];
-            WT xp = x * p, xxp;
-
-            x0 += p;
-            x1 += xp;
-            xxp = xp * x;
-            x2 += xxp;
-            x3 += xxp * x;
-        }
-
-        WT py = y * x0, sy = y*y;
-
-        mom[9] += ((MT)py) * sy;  // m03
-        mom[8] += ((MT)x1) * sy;  // m12
-        mom[7] += ((MT)x2) * y;  // m21
-        mom[6] += x3;             // m30
-        mom[5] += x0 * sy;        // m02
-        mom[4] += x1 * y;         // m11
-        mom[3] += x2;             // m20
-        mom[2] += py;             // m01
-        mom[1] += x1;             // m10
-        mom[0] += x0;             // m00
-    }
-
-    for(int x = 0; x < 10; x++ )
-        moments[x] = (double)mom[x];
-}
-
-#endif
 
 typedef void (*MomentsInTileFunc)(const Mat& img, double* moments);
 
@@ -369,22 +396,31 @@ Moments::Moments( double _m00, double _m10, double _m01, double _m20, double _m1
 
 #ifdef HAVE_OPENCL
 
-static bool ocl_moments( InputArray _src, Moments& m)
+static bool ocl_moments( InputArray _src, Moments& m, bool binary)
 {
     const int TILE_SIZE = 32;
     const int K = 10;
-    ocl::Kernel k("moments", ocl::imgproc::moments_oclsrc, format("-D TILE_SIZE=%d", TILE_SIZE));
+
+    Size sz = _src.getSz();
+    int xtiles = divUp(sz.width, TILE_SIZE);
+    int ytiles = divUp(sz.height, TILE_SIZE);
+    int ntiles = xtiles*ytiles;
+    if (ntiles == 0)
+        return false;
+
+    ocl::Kernel k = ocl::Kernel("moments", ocl::imgproc::moments_oclsrc,
+        format("-D TILE_SIZE=%d%s",
+        TILE_SIZE,
+        binary ? " -D OP_MOMENTS_BINARY" : ""));
+
     if( k.empty() )
         return false;
 
     UMat src = _src.getUMat();
-    Size sz = src.size();
-    int xtiles = (sz.width + TILE_SIZE-1)/TILE_SIZE;
-    int ytiles = (sz.height + TILE_SIZE-1)/TILE_SIZE;
-    int ntiles = xtiles*ytiles;
     UMat umbuf(1, ntiles*K, CV_32S);
 
-    size_t globalsize[] = {xtiles, sz.height}, localsize[] = {1, TILE_SIZE};
+    size_t globalsize[] = {(size_t)xtiles, std::max((size_t)TILE_SIZE, (size_t)sz.height)};
+    size_t localsize[] = {1, TILE_SIZE};
     bool ok = k.args(ocl::KernelArg::ReadOnly(src),
                      ocl::KernelArg::PtrWriteOnly(umbuf),
                      xtiles).run(2, globalsize, localsize, true);
@@ -430,118 +466,203 @@ static bool ocl_moments( InputArray _src, Moments& m)
         m.m03 += mom[9] + y * (3. * mom[5] + y * (3. * mom[2] + ym));
     }
 
+    completeMomentState( &m );
+
     return true;
 }
 
 #endif
 
-}
+#ifdef HAVE_IPP
+typedef IppStatus (CV_STDCALL * ippiMoments)(const void* pSrc, int srcStep, IppiSize roiSize, IppiMomentState_64f* pCtx);
 
+static bool ipp_moments(Mat &src, Moments &m )
+{
+#if IPP_VERSION_X100 >= 900
+    CV_INSTRUMENT_REGION_IPP();
+
+#if IPP_VERSION_X100 < 201801
+    // Degradations for CV_8UC1
+    if(src.type() == CV_8UC1)
+        return false;
+#endif
+
+    IppiSize  roi      = { src.cols, src.rows };
+    IppiPoint point    = { 0, 0 };
+    int       type     = src.type();
+    IppStatus ippStatus;
+
+    IppAutoBuffer<IppiMomentState_64f> state;
+    int stateSize = 0;
+
+    ippiMoments ippiMoments64f =
+        (type == CV_8UC1)?(ippiMoments)ippiMoments64f_8u_C1R:
+        (type == CV_16UC1)?(ippiMoments)ippiMoments64f_16u_C1R:
+        (type == CV_32FC1)?(ippiMoments)ippiMoments64f_32f_C1R:
+        NULL;
+    if(!ippiMoments64f)
+        return false;
+
+    ippStatus = ippiMomentGetStateSize_64f(ippAlgHintAccurate, &stateSize);
+    if(ippStatus < 0)
+        return false;
+
+    if(!state.allocate(stateSize) && stateSize)
+        return false;
+
+    ippStatus = ippiMomentInit_64f(state, ippAlgHintAccurate);
+    if(ippStatus < 0)
+        return false;
+
+    ippStatus = CV_INSTRUMENT_FUN_IPP(ippiMoments64f, src.ptr<Ipp8u>(), (int)src.step, roi, state);
+    if(ippStatus < 0)
+        return false;
+
+    ippStatus = ippiGetSpatialMoment_64f(state, 0, 0, 0, point, &m.m00);
+    if(ippStatus < 0)
+        return false;
+    ippiGetSpatialMoment_64f(state, 1, 0, 0, point, &m.m10);
+    ippiGetSpatialMoment_64f(state, 0, 1, 0, point, &m.m01);
+    ippiGetSpatialMoment_64f(state, 2, 0, 0, point, &m.m20);
+    ippiGetSpatialMoment_64f(state, 1, 1, 0, point, &m.m11);
+    ippiGetSpatialMoment_64f(state, 0, 2, 0, point, &m.m02);
+    ippiGetSpatialMoment_64f(state, 3, 0, 0, point, &m.m30);
+    ippiGetSpatialMoment_64f(state, 2, 1, 0, point, &m.m21);
+    ippiGetSpatialMoment_64f(state, 1, 2, 0, point, &m.m12);
+    ippiGetSpatialMoment_64f(state, 0, 3, 0, point, &m.m03);
+
+    ippStatus = ippiGetCentralMoment_64f(state, 2, 0, 0, &m.mu20);
+    if(ippStatus < 0)
+        return false;
+    ippiGetCentralMoment_64f(state, 1, 1, 0, &m.mu11);
+    ippiGetCentralMoment_64f(state, 0, 2, 0, &m.mu02);
+    ippiGetCentralMoment_64f(state, 3, 0, 0, &m.mu30);
+    ippiGetCentralMoment_64f(state, 2, 1, 0, &m.mu21);
+    ippiGetCentralMoment_64f(state, 1, 2, 0, &m.mu12);
+    ippiGetCentralMoment_64f(state, 0, 3, 0, &m.mu03);
+
+    ippStatus = ippiGetNormalizedCentralMoment_64f(state, 2, 0, 0, &m.nu20);
+    if(ippStatus < 0)
+        return false;
+    ippiGetNormalizedCentralMoment_64f(state, 1, 1, 0, &m.nu11);
+    ippiGetNormalizedCentralMoment_64f(state, 0, 2, 0, &m.nu02);
+    ippiGetNormalizedCentralMoment_64f(state, 3, 0, 0, &m.nu30);
+    ippiGetNormalizedCentralMoment_64f(state, 2, 1, 0, &m.nu21);
+    ippiGetNormalizedCentralMoment_64f(state, 1, 2, 0, &m.nu12);
+    ippiGetNormalizedCentralMoment_64f(state, 0, 3, 0, &m.nu03);
+
+    return true;
+#else
+    CV_UNUSED(src); CV_UNUSED(m);
+    return false;
+#endif
+}
+#endif
+
+}
 
 cv::Moments cv::moments( InputArray _src, bool binary )
 {
+    CV_INSTRUMENT_REGION();
+
     const int TILE_SIZE = 32;
     MomentsInTileFunc func = 0;
     uchar nzbuf[TILE_SIZE*TILE_SIZE];
     Moments m;
-    int type = _src.type();
-    int depth = CV_MAT_DEPTH( type );
-    int cn = CV_MAT_CN( type );
+    int type = _src.type(), depth = CV_MAT_DEPTH(type), cn = CV_MAT_CN(type);
     Size size = _src.size();
 
     if( size.width <= 0 || size.height <= 0 )
         return m;
 
 #ifdef HAVE_OPENCL
-    if( ocl::useOpenCL() && type == CV_8UC1 && !binary &&
-        _src.isUMat() && ocl_moments(_src, m) )
-        ;
-    else
+    CV_OCL_RUN_(type == CV_8UC1 && _src.isUMat(), ocl_moments(_src, m, binary), m);
 #endif
+
+    Mat mat = _src.getMat();
+    if( mat.checkVector(2) >= 0 && (depth == CV_32F || depth == CV_32S))
+        return contourMoments(mat);
+
+    if( cn > 1 )
+        CV_Error( CV_StsBadArg, "Invalid image type (must be single-channel)" );
+
+    CV_IPP_RUN(!binary, ipp_moments(mat, m), m);
+
+    if( binary || depth == CV_8U )
+        func = momentsInTile<uchar, int, int>;
+    else if( depth == CV_16U )
+        func = momentsInTile<ushort, int, int64>;
+    else if( depth == CV_16S )
+        func = momentsInTile<short, int, int64>;
+    else if( depth == CV_32F )
+        func = momentsInTile<float, double, double>;
+    else if( depth == CV_64F )
+        func = momentsInTile<double, double, double>;
+    else
+        CV_Error( CV_StsUnsupportedFormat, "" );
+
+    Mat src0(mat);
+
+    for( int y = 0; y < size.height; y += TILE_SIZE )
     {
-        Mat mat = _src.getMat();
-        if( mat.checkVector(2) >= 0 && (depth == CV_32F || depth == CV_32S))
-            return contourMoments(mat);
+        Size tileSize;
+        tileSize.height = std::min(TILE_SIZE, size.height - y);
 
-        if( cn > 1 )
-            CV_Error( CV_StsBadArg, "Invalid image type (must be single-channel)" );
-
-        if( binary || depth == CV_8U )
-            func = momentsInTile<uchar, int, int>;
-        else if( depth == CV_16U )
-            func = momentsInTile<ushort, int, int64>;
-        else if( depth == CV_16S )
-            func = momentsInTile<short, int, int64>;
-        else if( depth == CV_32F )
-            func = momentsInTile<float, double, double>;
-        else if( depth == CV_64F )
-            func = momentsInTile<double, double, double>;
-        else
-            CV_Error( CV_StsUnsupportedFormat, "" );
-
-        Mat src0(mat);
-
-        for( int y = 0; y < size.height; y += TILE_SIZE )
+        for( int x = 0; x < size.width; x += TILE_SIZE )
         {
-            Size tileSize;
-            tileSize.height = std::min(TILE_SIZE, size.height - y);
+            tileSize.width = std::min(TILE_SIZE, size.width - x);
+            Mat src(src0, cv::Rect(x, y, tileSize.width, tileSize.height));
 
-            for( int x = 0; x < size.width; x += TILE_SIZE )
+            if( binary )
             {
-                tileSize.width = std::min(TILE_SIZE, size.width - x);
-                Mat src(src0, cv::Rect(x, y, tileSize.width, tileSize.height));
-
-                if( binary )
-                {
-                    cv::Mat tmp(tileSize, CV_8U, nzbuf);
-                    cv::compare( src, 0, tmp, CV_CMP_NE );
-                    src = tmp;
-                }
-
-                double mom[10];
-                func( src, mom );
-
-                if(binary)
-                {
-                    double s = 1./255;
-                    for( int k = 0; k < 10; k++ )
-                        mom[k] *= s;
-                }
-
-                double xm = x * mom[0], ym = y * mom[0];
-
-                // accumulate moments computed in each tile
-
-                // + m00 ( = m00' )
-                m.m00 += mom[0];
-
-                // + m10 ( = m10' + x*m00' )
-                m.m10 += mom[1] + xm;
-
-                // + m01 ( = m01' + y*m00' )
-                m.m01 += mom[2] + ym;
-
-                // + m20 ( = m20' + 2*x*m10' + x*x*m00' )
-                m.m20 += mom[3] + x * (mom[1] * 2 + xm);
-
-                // + m11 ( = m11' + x*m01' + y*m10' + x*y*m00' )
-                m.m11 += mom[4] + x * (mom[2] + ym) + y * mom[1];
-
-                // + m02 ( = m02' + 2*y*m01' + y*y*m00' )
-                m.m02 += mom[5] + y * (mom[2] * 2 + ym);
-
-                // + m30 ( = m30' + 3*x*m20' + 3*x*x*m10' + x*x*x*m00' )
-                m.m30 += mom[6] + x * (3. * mom[3] + x * (3. * mom[1] + xm));
-
-                // + m21 ( = m21' + x*(2*m11' + 2*y*m10' + x*m01' + x*y*m00') + y*m20')
-                m.m21 += mom[7] + x * (2 * (mom[4] + y * mom[1]) + x * (mom[2] + ym)) + y * mom[3];
-
-                // + m12 ( = m12' + y*(2*m11' + 2*x*m01' + y*m10' + x*y*m00') + x*m02')
-                m.m12 += mom[8] + y * (2 * (mom[4] + x * mom[2]) + y * (mom[1] + xm)) + x * mom[5];
-
-                // + m03 ( = m03' + 3*y*m02' + 3*y*y*m01' + y*y*y*m00' )
-                m.m03 += mom[9] + y * (3. * mom[5] + y * (3. * mom[2] + ym));
+                cv::Mat tmp(tileSize, CV_8U, nzbuf);
+                cv::compare( src, 0, tmp, CV_CMP_NE );
+                src = tmp;
             }
+
+            double mom[10];
+            func( src, mom );
+
+            if(binary)
+            {
+                double s = 1./255;
+                for( int k = 0; k < 10; k++ )
+                    mom[k] *= s;
+            }
+
+            double xm = x * mom[0], ym = y * mom[0];
+
+            // accumulate moments computed in each tile
+
+            // + m00 ( = m00' )
+            m.m00 += mom[0];
+
+            // + m10 ( = m10' + x*m00' )
+            m.m10 += mom[1] + xm;
+
+            // + m01 ( = m01' + y*m00' )
+            m.m01 += mom[2] + ym;
+
+            // + m20 ( = m20' + 2*x*m10' + x*x*m00' )
+            m.m20 += mom[3] + x * (mom[1] * 2 + xm);
+
+            // + m11 ( = m11' + x*m01' + y*m10' + x*y*m00' )
+            m.m11 += mom[4] + x * (mom[2] + ym) + y * mom[1];
+
+            // + m02 ( = m02' + 2*y*m01' + y*y*m00' )
+            m.m02 += mom[5] + y * (mom[2] * 2 + ym);
+
+            // + m30 ( = m30' + 3*x*m20' + 3*x*x*m10' + x*x*x*m00' )
+            m.m30 += mom[6] + x * (3. * mom[3] + x * (3. * mom[1] + xm));
+
+            // + m21 ( = m21' + x*(2*m11' + 2*y*m10' + x*m01' + x*y*m00') + y*m20')
+            m.m21 += mom[7] + x * (2 * (mom[4] + y * mom[1]) + x * (mom[2] + ym)) + y * mom[3];
+
+            // + m12 ( = m12' + y*(2*m11' + 2*x*m01' + y*m10' + x*y*m00') + x*m02')
+            m.m12 += mom[8] + y * (2 * (mom[4] + x * mom[2]) + y * (mom[1] + xm)) + x * mom[5];
+
+            // + m03 ( = m03' + 3*y*m02' + 3*y*y*m01' + y*y*y*m00' )
+            m.m03 += mom[9] + y * (3. * mom[5] + y * (3. * mom[2] + ym));
         }
     }
 
@@ -552,6 +673,8 @@ cv::Moments cv::moments( InputArray _src, bool binary )
 
 void cv::HuMoments( const Moments& m, double hu[7] )
 {
+    CV_INSTRUMENT_REGION();
+
     double t0 = m.nu30 + m.nu12;
     double t1 = m.nu21 + m.nu03;
 
@@ -579,10 +702,12 @@ void cv::HuMoments( const Moments& m, double hu[7] )
 
 void cv::HuMoments( const Moments& m, OutputArray _hu )
 {
+    CV_INSTRUMENT_REGION();
+
     _hu.create(7, 1, CV_64F);
     Mat hu = _hu.getMat();
     CV_Assert( hu.isContinuous() );
-    HuMoments(m, (double*)hu.data);
+    HuMoments(m, hu.ptr<double>());
 }
 
 
@@ -596,7 +721,7 @@ CV_IMPL void cvMoments( const CvArr* arr, CvMoments* moments, int binary )
         src = cv::cvarrToMat(arr);
     cv::Moments m = cv::moments(src, binary != 0);
     CV_Assert( moments != 0 );
-    *moments = m;
+    *moments = cvMoments(m);
 }
 
 

@@ -39,13 +39,13 @@
 //
 //M*/
 
-#include "perf_precomp.hpp"
+#include "../perf_precomp.hpp"
 #include "opencv2/stitching/warpers.hpp"
 #include "opencv2/ts/ocl_perf.hpp"
 
 #ifdef HAVE_OPENCL
 
-namespace cvtest {
+namespace opencv_test {
 namespace ocl {
 
 ///////////////////////// Stitching Warpers ///////////////////////////
@@ -54,7 +54,8 @@ enum
 {
     SphericalWarperType = 0,
     CylindricalWarperType = 1,
-    PlaneWarperType = 2
+    PlaneWarperType = 2,
+    AffineWarperType = 3,
 };
 
 class WarperBase
@@ -63,24 +64,14 @@ public:
     explicit WarperBase(int type, Size srcSize)
     {
         Ptr<WarperCreator> creator;
-        if (cv::ocl::useOpenCL())
-        {
-            if (type == SphericalWarperType)
-                creator = makePtr<SphericalWarperOcl>();
-            else if (type == CylindricalWarperType)
-                creator = makePtr<CylindricalWarperOcl>();
-            else if (type == PlaneWarperType)
-                creator = makePtr<PlaneWarperOcl>();
-        }
-        else
-        {
-            if (type == SphericalWarperType)
-                creator = makePtr<SphericalWarper>();
-            else if (type == CylindricalWarperType)
-                creator = makePtr<CylindricalWarper>();
-            else if (type == PlaneWarperType)
-                creator = makePtr<PlaneWarper>();
-        }
+        if (type == SphericalWarperType)
+            creator = makePtr<SphericalWarper>();
+        else if (type == CylindricalWarperType)
+            creator = makePtr<CylindricalWarper>();
+        else if (type == PlaneWarperType)
+            creator = makePtr<PlaneWarper>();
+        else if (type == AffineWarperType)
+            creator = makePtr<AffineWarper>();
         CV_Assert(!creator.empty());
 
         K = Mat::eye(3, 3, CV_32FC1);
@@ -110,7 +101,7 @@ private:
     Mat K, R;
 };
 
-CV_ENUM(WarperType, SphericalWarperType, CylindricalWarperType, PlaneWarperType)
+CV_ENUM(WarperType, SphericalWarperType, CylindricalWarperType, PlaneWarperType, AffineWarperType)
 
 typedef tuple<Size, WarperType> StitchingWarpersParams;
 typedef TestBaseWithParam<StitchingWarpersParams> StitchingWarpersFixture;
@@ -166,6 +157,6 @@ OCL_PERF_TEST_P(StitchingWarpersFixture, StitchingWarpers_Warp,
     SANITY_CHECK(dst, 1e-5);
 }
 
-} } // namespace cvtest::ocl
+} } // namespace opencv_test::ocl
 
 #endif // HAVE_OPENCL

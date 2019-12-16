@@ -50,7 +50,7 @@
 // aaaaaa|abcdefgh|hhhhhhh
 #define EXTRAPOLATE(x, maxV) \
     { \
-        (x) = max(min((x), (maxV) - 1), 0); \
+        (x) = clamp((x), 0, (maxV)-1); \
     }
 #elif defined BORDER_WRAP
 // cdefgh|abcdefgh|abcdefg
@@ -100,8 +100,8 @@
 // horizontal and vertical filter kernels
 // should be defined on host during compile time to avoid overhead
 #define DIG(a) a,
-__constant float mat_kernelX[] = { KERNEL_MATRIX_X };
-__constant float mat_kernelY[] = { KERNEL_MATRIX_Y };
+__constant WT1 mat_kernelX[] = { KERNEL_MATRIX_X };
+__constant WT1 mat_kernelY[] = { KERNEL_MATRIX_Y };
 
 __kernel void sep_filter(__global uchar* Src, int src_step, int srcOffsetX, int srcOffsetY, int height, int width,
                          __global uchar* Dst, int dst_step, int dst_offset, int dst_rows, int dst_cols, float delta)
@@ -119,22 +119,17 @@ __kernel void sep_filter(__global uchar* Src, int src_step, int srcOffsetX, int 
     int liy = get_local_id(1);
 
     int x = get_global_id(0);
-    int y = get_global_id(1);
 
     // calculate pixel position in source image taking image offset into account
     int srcX = x + srcOffsetX - RADIUSX;
-    int srcY = y + srcOffsetY - RADIUSY;
-    int xb = srcX;
-    int yb = srcY;
 
     // extrapolate coordinates, if needed
     // and read my own source pixel into local memory
     // with account for extra border pixels, which will be read by starting workitems
     int clocY = liy;
-    int cSrcY = srcY;
     do
     {
-        int yb = cSrcY;
+        int yb = clocY + srcOffsetY - RADIUSY;
         EXTRAPOLATE(yb, (height));
 
         int clocX = lix;
@@ -151,37 +146,80 @@ __kernel void sep_filter(__global uchar* Src, int src_step, int srcOffsetX, int 
         while(clocX < BLK_X+(RADIUSX*2));
 
         clocY += BLK_Y;
-        cSrcY += BLK_Y;
     }
     while (clocY < BLK_Y+(RADIUSY*2));
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    // do vertical filter pass
-    // and store intermediate results to second local memory array
-    int i, clocX = lix;
-    WT sum = 0.0f;
-    do
+    for (int y = 0; y < dst_rows; y+=BLK_Y)
     {
-        sum = 0.0f;
-        for (i=0; i<=2*RADIUSY; i++)
-            sum = mad(lsmem[liy+i][clocX], mat_kernelY[i], sum);
-        lsmemDy[liy][clocX] = sum;
-        clocX += BLK_X;
+        // do vertical filter pass
+        // and store intermediate results to second local memory array
+        int i, clocX = lix;
+        WT sum = (WT) 0;
+        do
+        {
+            sum = (WT) 0;
+            for (i=0; i<=2*RADIUSY; i++)
+#if (defined(INTEGER_ARITHMETIC) && !INTEL_DEVICE)
+                sum = mad24(lsmem[liy + i][clocX], mat_kernelY[i], sum);
+#else
+                sum = mad(lsmem[liy + i][clocX], mat_kernelY[i], sum);
+#endif
+            lsmemDy[liy][clocX] = sum;
+            clocX += BLK_X;
+        }
+        while(clocX < BLK_X+(RADIUSX*2));
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        // if this pixel happened to be out of image borders because of global size rounding,
+        // then just return
+        if ((x < dst_cols) && (y + liy < dst_rows))
+        {
+            // do second horizontal filter pass
+            // and calculate final result
+            sum = 0.0f;
+            for (i=0; i<=2*RADIUSX; i++)
+#if (defined(INTEGER_ARITHMETIC) && !INTEL_DEVICE)
+                sum = mad24(lsmemDy[liy][lix+i], mat_kernelX[i], sum);
+#else
+                sum = mad(lsmemDy[liy][lix+i], mat_kernelX[i], sum);
+#endif
+
+#ifdef INTEGER_ARITHMETIC
+#ifdef INTEL_DEVICE
+            sum = (sum + (1 << (SHIFT_BITS-1))) / (1 << SHIFT_BITS);
+#else
+            sum = (sum + (1 << (SHIFT_BITS-1))) >> SHIFT_BITS;
+#endif
+#endif
+            // store result into destination image
+            storepix(convertToDstT(sum + (WT)(delta)), Dst + mad24(y + liy, dst_step, mad24(x, DSTSIZE, dst_offset)));
+        }
+
+        for (int i = liy * BLK_X + lix; i < (RADIUSY*2) * (BLK_X+(RADIUSX*2)); i += BLK_X * BLK_Y)
+        {
+            int clocX = i % (BLK_X+(RADIUSX*2));
+            int clocY = i / (BLK_X+(RADIUSX*2));
+            lsmem[clocY][clocX] = lsmem[clocY + BLK_Y][clocX];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+
+        int yb = y + liy + BLK_Y + srcOffsetY + RADIUSY;
+        EXTRAPOLATE(yb, (height));
+
+        clocX = lix;
+        int cSrcX = x + srcOffsetX - RADIUSX;
+        do
+        {
+            int xb = cSrcX;
+            EXTRAPOLATE(xb,(width));
+            lsmem[liy + 2*RADIUSY][clocX] = ELEM(xb, yb, (width), (height), 0 );
+
+            clocX += BLK_X;
+            cSrcX += BLK_X;
+        }
+        while(clocX < BLK_X+(RADIUSX*2));
+        barrier(CLK_LOCAL_MEM_FENCE);
     }
-    while(clocX < BLK_X+(RADIUSX*2));
-    barrier(CLK_LOCAL_MEM_FENCE);
 
-    // if this pixel happened to be out of image borders because of global size rounding,
-    // then just return
-    if( x >= dst_cols || y >=dst_rows )
-        return;
-
-    // do second horizontal filter pass
-    // and calculate final result
-    sum = 0.0f;
-    for (i=0; i<=2*RADIUSX; i++)
-        sum = mad(lsmemDy[liy][lix+i], mat_kernelX[i], sum);
-
-    // store result into destination image
-    storepix(convertToDstT(sum + (WT)(delta)), Dst + mad24(y, dst_step, mad24(x, DSTSIZE, dst_offset)));
 }

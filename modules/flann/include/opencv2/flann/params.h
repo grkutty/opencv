@@ -30,6 +30,8 @@
 #ifndef OPENCV_FLANN_PARAMS_H_
 #define OPENCV_FLANN_PARAMS_H_
 
+//! @cond IGNORED
+
 #include "any.h"
 #include "general.h"
 #include <iostream>
@@ -79,18 +81,22 @@ T get_param(const IndexParams& params, cv::String name)
     }
 }
 
-inline void print_params(const IndexParams& params)
+inline void print_params(const IndexParams& params, std::ostream& stream)
 {
     IndexParams::const_iterator it;
 
     for(it=params.begin(); it!=params.end(); ++it) {
-        std::cout << it->first << " : " << it->second << std::endl;
+        stream << it->first << " : " << it->second << std::endl;
     }
 }
 
-
+inline void print_params(const IndexParams& params)
+{
+    print_params(params, std::cout);
+}
 
 }
 
+//! @endcond
 
 #endif /* OPENCV_FLANN_PARAMS_H_ */

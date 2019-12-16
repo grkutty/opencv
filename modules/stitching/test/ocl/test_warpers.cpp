@@ -39,29 +39,28 @@
 //
 //M*/
 
-#include "test_precomp.hpp"
+#include "../test_precomp.hpp"
 #include "opencv2/ts/ocl_test.hpp"
 #include "opencv2/stitching/warpers.hpp"
 
 #ifdef HAVE_OPENCL
 
-namespace cvtest {
+namespace opencv_test {
 namespace ocl {
-
-///////////////////////// WarperTestBase ///////////////////////////
 
 struct WarperTestBase :
         public Test, public TestUtils
 {
     Mat src, dst, xmap, ymap;
-    Mat udst, uxmap, uymap;
+    UMat usrc, udst, uxmap, uymap;
     Mat K, R;
 
-    virtual void generateTestData()
+    void generateTestData()
     {
         Size size = randomSize(1, MAX_VALUE);
 
         src = randomMat(size, CV_32FC1, -500, 500);
+        src.copyTo(usrc);
 
         K = Mat::eye(3, 3, CV_32FC1);
         float angle = (float)(30.0 * CV_PI / 180.0);
@@ -81,75 +80,90 @@ struct WarperTestBase :
     }
 };
 
-//////////////////////////////// SphericalWarperOcl /////////////////////////////////////////////////
+typedef WarperTestBase SphericalWarperTest;
 
-typedef WarperTestBase SphericalWarperOclTest;
-
-OCL_TEST_F(SphericalWarperOclTest, Mat)
+OCL_TEST_F(SphericalWarperTest, Mat)
 {
     for (int j = 0; j < test_loop_times; j++)
     {
         generateTestData();
 
-        Ptr<WarperCreator> creator = makePtr<SphericalWarperOcl>();
+        Ptr<WarperCreator> creator = makePtr<SphericalWarper>();
         Ptr<detail::RotationWarper> warper = creator->create(2.0);
 
         OCL_OFF(warper->buildMaps(src.size(), K, R, xmap, ymap));
-        OCL_ON(warper->buildMaps(src.size(), K, R, uxmap, uymap));
+        OCL_ON(warper->buildMaps(usrc.size(), K, R, uxmap, uymap));
 
         OCL_OFF(warper->warp(src, K, R, INTER_LINEAR, BORDER_REPLICATE, dst));
-        OCL_ON(warper->warp(src, K, R, INTER_LINEAR, BORDER_REPLICATE, udst));
+        OCL_ON(warper->warp(usrc, K, R, INTER_LINEAR, BORDER_REPLICATE, udst));
 
         Near(1e-4);
     }
 }
 
-//////////////////////////////// CylindricalWarperOcl /////////////////////////////////////////////////
+typedef WarperTestBase CylindricalWarperTest;
 
-typedef WarperTestBase CylindricalWarperOclTest;
-
-OCL_TEST_F(CylindricalWarperOclTest, Mat)
+OCL_TEST_F(CylindricalWarperTest, Mat)
 {
     for (int j = 0; j < test_loop_times; j++)
     {
         generateTestData();
 
-        Ptr<WarperCreator> creator = makePtr<CylindricalWarperOcl>();
+        Ptr<WarperCreator> creator = makePtr<CylindricalWarper>();
         Ptr<detail::RotationWarper> warper = creator->create(2.0);
 
         OCL_OFF(warper->buildMaps(src.size(), K, R, xmap, ymap));
-        OCL_ON(warper->buildMaps(src.size(), K, R, uxmap, uymap));
+        OCL_ON(warper->buildMaps(usrc.size(), K, R, uxmap, uymap));
 
         OCL_OFF(warper->warp(src, K, R, INTER_LINEAR, BORDER_REPLICATE, dst));
-        OCL_ON(warper->warp(src, K, R, INTER_LINEAR, BORDER_REPLICATE, udst));
+        OCL_ON(warper->warp(usrc, K, R, INTER_LINEAR, BORDER_REPLICATE, udst));
 
         Near(1e-4);
     }
 }
 
-//////////////////////////////// PlaneWarperOcl /////////////////////////////////////////////////
+typedef WarperTestBase PlaneWarperTest;
 
-typedef WarperTestBase PlaneWarperOclTest;
-
-OCL_TEST_F(PlaneWarperOclTest, Mat)
+OCL_TEST_F(PlaneWarperTest, Mat)
 {
     for (int j = 0; j < test_loop_times; j++)
     {
         generateTestData();
 
-        Ptr<WarperCreator> creator = makePtr<PlaneWarperOcl>();
+        Ptr<WarperCreator> creator = makePtr<PlaneWarper>();
         Ptr<detail::RotationWarper> warper = creator->create(2.0);
 
         OCL_OFF(warper->buildMaps(src.size(), K, R, xmap, ymap));
-        OCL_ON(warper->buildMaps(src.size(), K, R, uxmap, uymap));
+        OCL_ON(warper->buildMaps(usrc.size(), K, R, uxmap, uymap));
 
         OCL_OFF(warper->warp(src, K, R, INTER_LINEAR, BORDER_REPLICATE, dst));
-        OCL_ON(warper->warp(src, K, R, INTER_LINEAR, BORDER_REPLICATE, udst));
+        OCL_ON(warper->warp(usrc, K, R, INTER_LINEAR, BORDER_REPLICATE, udst));
 
-        Near(1e-4);
+        Near(1.5e-4);
     }
 }
 
-} } // namespace cvtest::ocl
+typedef WarperTestBase AffineWarperTest;
+
+OCL_TEST_F(AffineWarperTest, Mat)
+{
+    for (int j = 0; j < test_loop_times; j++)
+    {
+        generateTestData();
+
+        Ptr<WarperCreator> creator = makePtr<AffineWarper>();
+        Ptr<detail::RotationWarper> warper = creator->create(1.0);
+
+        OCL_OFF(warper->buildMaps(src.size(), K, R, xmap, ymap));
+        OCL_ON(warper->buildMaps(usrc.size(), K, R, uxmap, uymap));
+
+        OCL_OFF(warper->warp(src, K, R, INTER_LINEAR, BORDER_REPLICATE, dst));
+        OCL_ON(warper->warp(usrc, K, R, INTER_LINEAR, BORDER_REPLICATE, udst));
+
+        Near(1.5e-4);
+    }
+}
+
+} } // namespace opencv_test::ocl
 
 #endif // HAVE_OPENCL

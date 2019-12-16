@@ -51,6 +51,7 @@
 #include <set>
 #include <functional>
 #include <sstream>
+#include <iostream>
 #include <cmath>
 #include "opencv2/core.hpp"
 #include "opencv2/core/ocl.hpp"
@@ -58,6 +59,7 @@
 #include "opencv2/stitching.hpp"
 #include "opencv2/stitching/detail/autocalib.hpp"
 #include "opencv2/stitching/detail/blenders.hpp"
+#include "opencv2/stitching/detail/timelapsers.hpp"
 #include "opencv2/stitching/detail/camera.hpp"
 #include "opencv2/stitching/detail/exposure_compensate.hpp"
 #include "opencv2/stitching/detail/matchers.hpp"
@@ -81,20 +83,12 @@
 #  include "opencv2/cudafeatures2d.hpp"
 #endif
 
-#ifdef HAVE_OPENCV_CUDA
-#  include "opencv2/cuda.hpp"
+#ifdef HAVE_OPENCV_CUDALEGACY
+#  include "opencv2/cudalegacy.hpp"
 #endif
-
-#ifdef HAVE_OPENCV_NONFREE
-#  include "opencv2/nonfree/cuda.hpp"
-#endif
-
-#include "../../imgproc/src/gcgraph.hpp"
 
 #include "opencv2/core/private.hpp"
 
-#ifdef HAVE_TEGRA_OPTIMIZATION
-# include "opencv2/stitching/stitching_tegra.hpp"
-#endif
+#include "util_log.hpp"
 
 #endif

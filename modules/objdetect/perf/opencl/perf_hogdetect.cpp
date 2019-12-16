@@ -44,17 +44,16 @@
 //
 //M*/
 
-#include "perf_precomp.hpp"
+#include "../perf_precomp.hpp"
 #include "opencv2/ts/ocl_perf.hpp"
 
 #ifdef HAVE_OPENCL
 
-namespace cvtest {
+namespace opencv_test {
 namespace ocl {
 ///////////// HOG////////////////////////
 
-struct RectLess :
-        public std::binary_function<cv::Rect, cv::Rect, bool>
+struct RectLess
 {
     bool operator()(const cv::Rect& a,
         const cv::Rect& b) const
@@ -85,7 +84,7 @@ OCL_PERF_TEST(HOGFixture, HOG)
     OCL_TEST_CYCLE() hog.detectMultiScale(src, found_locations);
 
     std::sort(found_locations.begin(), found_locations.end(), RectLess());
-    SANITY_CHECK(found_locations, 1 + DBL_EPSILON);
+    SANITY_CHECK(found_locations, 3);
 }
 
 }
